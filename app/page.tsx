@@ -15,6 +15,7 @@ import { useToast } from "./components/ui/toaster";
 import { postJSON, type ClientApiError } from "./lib/api-client";
 import { cacheTranslation, getProject, getSetting, saveProject, setSetting, setStepProgress } from "./lib/storage";
 import { cn, extractVideoId } from "./lib/utils";
+import { parsePastedTranscript } from "./lib/transcript";
 import type { ExtractResponse, Guide, Project } from "./lib/types";
 
 const TABS = [
@@ -64,11 +65,12 @@ export default function Home() {
     setDetail(undefined);
   };
 
-  const run = async (url: string) => {
+  const run = async (url: string, pastedTranscript?: string) => {
     const videoId = extractVideoId(url)!;
+    const pasted = pastedTranscript ? parsePastedTranscript(pastedTranscript) : [];
     // Instant load from local history in the requested language.
     const cached = await getProject(videoId);
-    if (cached?.guides[lang]) {
+    if (cached?.guides[lang] && !pasted.length) {
       setProject(cached);
       toast({ kind: "info", title: "Loaded from history", description: "This tutorial was already processed." });
       return;
@@ -78,11 +80,14 @@ export default function Home() {
     try {
       setStage(0);
       setDetail("Looking for captions…");
-      const ex = await postJSON<ExtractResponse>("/api/extract", { url, targetLanguage: lang }, { queued: false });
+      let ex = await postJSON<ExtractResponse>("/api/extract", { url, targetLanguage: lang }, { queued: false });
+      if (pasted.length) ex = { ...ex, source: "transcript", transcript: pasted, transcriptLanguage: "pasted" };
       setDetail(
         ex.source === "transcript"
-          ? `Found ${ex.transcriptLanguage} captions (${ex.transcript!.length} segments)`
-          : "No captions — Gemini will watch the video directly",
+          ? pasted.length
+            ? `Using your pasted transcript (${pasted.length} lines)`
+            : `Found ${ex.transcriptLanguage} captions (${ex.transcript!.length} segments)`
+          : "No captions reachable — Gemini will watch the video at low resolution (slower, uses more quota)",
       );
 
       setStage(1);

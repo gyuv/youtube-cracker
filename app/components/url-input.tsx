@@ -1,25 +1,27 @@
 "use client";
 import { useState } from "react";
 import { motion } from "framer-motion";
-import { Clipboard, Loader2, Sparkles, Youtube } from "lucide-react";
+import { Clipboard, FileText, Loader2, Sparkles, Youtube } from "lucide-react";
 import { Button } from "./ui/button";
 import { extractVideoId } from "@/app/lib/utils";
 import { cn } from "@/app/lib/utils";
 
 interface Props {
-  onSubmit: (url: string) => void;
+  onSubmit: (url: string, transcript?: string) => void;
   loading?: boolean;
 }
 
 export function UrlInput({ onSubmit, loading }: Props) {
   const [value, setValue] = useState("");
   const [touched, setTouched] = useState(false);
+  const [showTranscript, setShowTranscript] = useState(false);
+  const [transcript, setTranscript] = useState("");
   const valid = !!extractVideoId(value);
   const showError = touched && value.length > 0 && !valid;
 
   const submit = (v = value) => {
     setTouched(true);
-    if (extractVideoId(v) && !loading) onSubmit(v.trim());
+    if (extractVideoId(v) && !loading) onSubmit(v.trim(), transcript.trim() || undefined);
   };
 
   const paste = async () => {
@@ -71,6 +73,27 @@ export function UrlInput({ onSubmit, loading }: Props) {
           <span className="hidden sm:inline">{loading ? "Working…" : "Recreate"}</span>
         </Button>
       </div>
+      <div className="mt-2 flex justify-center">
+        <button
+          type="button"
+          onClick={() => setShowTranscript((s) => !s)}
+          className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
+        >
+          <FileText className="h-3.5 w-3.5" />
+          {showTranscript ? "Hide transcript box" : "Captions blocked? Paste the transcript instead (uses far less quota)"}
+        </button>
+      </div>
+      {showTranscript && (
+        <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: "auto" }} className="mt-2">
+          <textarea
+            value={transcript}
+            onChange={(e) => setTranscript(e.target.value)}
+            disabled={loading}
+            placeholder={"On YouTube: … More → Show transcript, select all, copy, paste here.\n0:00\nHey everyone…"}
+            className="h-36 w-full rounded-xl border bg-card p-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          />
+        </motion.div>
+      )}
       {showError && (
         <p className="mt-2 pl-2 text-sm text-destructive">
           Enter a youtube.com/watch, youtu.be, /shorts/ or /embed/ link.

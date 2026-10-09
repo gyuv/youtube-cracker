@@ -109,6 +109,7 @@ export async function POST(req: Request) {
         system: SYSTEM(lang),
         parts: [youtubePart(body.meta.url), { text: `${header}\nWatch the video (audio + on-screen code) and build the guide.` }],
         schema: guideSchema,
+        lowMediaResolution: true,
       });
     }
 
