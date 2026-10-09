@@ -1,7 +1,7 @@
 import "server-only";
 import { GoogleGenerativeAI, SchemaType, type Part, type ResponseSchema } from "@google/generative-ai";
 
-export const MODEL = process.env.GEMINI_MODEL || "gemini-1.5-flash";
+export const MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
 
 /** Free tier ≈ 15 RPM for Flash. Space calls ≥4s apart per server instance. */
 const MIN_INTERVAL_MS = Number(process.env.GEMINI_MIN_INTERVAL_MS ?? 4000);
@@ -36,6 +36,8 @@ interface GenerateOpts {
   schema?: ResponseSchema;
   temperature?: number;
   maxOutputTokens?: number;
+  /** Low video resolution (~66 tokens/frame instead of ~258) keeps whole-video analysis inside free quotas. */
+  lowMediaResolution?: boolean;
 }
 
 /** Calls Gemini with throttling + exponential backoff on 429/5xx. Returns parsed JSON when a schema is given. */
@@ -47,6 +49,8 @@ export async function generate<T = string>(opts: GenerateOpts): Promise<T> {
       temperature: opts.temperature ?? 0.3,
       maxOutputTokens: opts.maxOutputTokens ?? 8192,
       ...(opts.schema ? { responseMimeType: "application/json", responseSchema: opts.schema } : {}),
+      // Not yet typed in @google/generative-ai, but accepted by the REST API.
+      ...(opts.lowMediaResolution ? ({ mediaResolution: "MEDIA_RESOLUTION_LOW" } as object) : {}),
     },
   });
 
@@ -60,14 +64,25 @@ export async function generate<T = string>(opts: GenerateOpts): Promise<T> {
     } catch (err: any) {
       lastErr = err;
       const status = err?.status ?? Number(String(err?.message).match(/\[(\d{3})/)?.[1]);
-      const retryable = status === 429 || status === 503 || status === 500 || err instanceof SyntaxError;
+      const dailyQuota = /PerDay|per day/i.test(String(err?.message));
+      const retryable = (status === 429 && !dailyQuota) || status === 503 || status === 500 || err instanceof SyntaxError;
       if (!retryable || attempt === 3) break;
       await new Promise((r) => setTimeout(r, 2000 * 2 ** attempt + Math.random() * 500));
     }
   }
   const msg = String((lastErr as any)?.message ?? lastErr);
   if (/429|quota|rate/i.test(msg)) {
-    throw new GeminiError("Gemini free-tier rate limit reached. Please wait a minute and retry.", "RATE_LIMIT");
+    const perDay = /PerDay|per day|daily/i.test(msg);
+    const retry = msg.match(/retry in ([\d.]+)s/i)?.[1];
+    throw new GeminiError(
+      perDay
+        ? `Gemini free-tier DAILY quota for ${MODEL} is used up. It resets at midnight Pacific time, or set GEMINI_MODEL to another model (e.g. gemini-2.5-flash-lite).`
+        : `Gemini free-tier per-minute limit hit${retry ? ` — retry in ${Math.ceil(Number(retry))}s` : ", wait a minute and retry"}. Long videos without captions use the most quota; pasting the transcript avoids that.`,
+      "RATE_LIMIT",
+    );
+  }
+  if (/not found|404|is not supported/i.test(msg)) {
+    throw new GeminiError(`Gemini model "${MODEL}" is unavailable for this key. Set GEMINI_MODEL to a current model (e.g. gemini-2.5-flash).`, "AI_ERROR");
   }
   throw new GeminiError(`Gemini request failed: ${msg.slice(0, 300)}`, "AI_ERROR");
 }

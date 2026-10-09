@@ -15,7 +15,7 @@ npm run dev
 | Env var | Default | Notes |
 |---|---|---|
 | `GEMINI_API_KEY` | — | Required (server-side only) |
-| `GEMINI_MODEL` | `gemini-1.5-flash` | Set this to a current Flash model (e.g. `gemini-2.0-flash`) if 1.5 isn't available on your key |
+| `GEMINI_MODEL` | `gemini-2.5-flash` | Any Gemini model on your key; `gemini-2.5-flash-lite` has a higher free daily quota |
 | `GEMINI_MIN_INTERVAL_MS` | `4000` | Minimum gap between Gemini calls on the server, to stay within the free tier's ~15 requests/minute |
 
 ## Pipeline

@@ -51,18 +51,54 @@ export async function fetchOEmbed(videoId: string): Promise<Partial<VideoMeta>> 
   }
 }
 
+/**
+ * YouTube's internal player API with the Android client. Datacenter IPs (Vercel)
+ * are blocked far less often here than on the watch page.
+ */
+async function fetchInnertubePlayer(videoId: string): Promise<any | null> {
+  try {
+    const r = await fetch("https://www.youtube.com/youtubei/v1/player?prettyPrint=false", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "User-Agent": "com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip",
+      },
+      body: JSON.stringify({
+        videoId,
+        context: { client: { clientName: "ANDROID", clientVersion: "19.09.37", androidSdkVersion: 30, hl: "en", gl: "US" } },
+      }),
+      cache: "no-store",
+    });
+    if (!r.ok) return null;
+    const j = await r.json();
+    return j?.captions || j?.videoDetails ? j : null;
+  } catch {
+    return null;
+  }
+}
+
+async function fetchWatchPagePlayer(videoId: string): Promise<any | null> {
+  try {
+    const res = await fetch(`https://www.youtube.com/watch?v=${videoId}&hl=en`, {
+      headers: { "User-Agent": UA, "Accept-Language": "en-US,en;q=0.9", Cookie: "CONSENT=YES+1" },
+      cache: "no-store",
+    });
+    return res.ok ? extractJson(await res.text(), "ytInitialPlayerResponse") : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function fetchVideoData(videoId: string): Promise<{
   meta: VideoMeta;
   tracks: CaptionTrack[];
   playable: boolean;
 }> {
   const url = `https://www.youtube.com/watch?v=${videoId}`;
-  const res = await fetch(`${url}&hl=en`, {
-    headers: { "User-Agent": UA, "Accept-Language": "en-US,en;q=0.9", Cookie: "CONSENT=YES+1" },
-    cache: "no-store",
-  });
-  const html = res.ok ? await res.text() : "";
-  const player = extractJson(html, "ytInitialPlayerResponse");
+  let player = await fetchInnertubePlayer(videoId);
+  if (!player?.captions?.playerCaptionsTracklistRenderer?.captionTracks?.length) {
+    player = (await fetchWatchPagePlayer(videoId)) ?? player;
+  }
   const details = player?.videoDetails ?? {};
   const oembed = details.title ? {} : await fetchOEmbed(videoId);
   const tracks: CaptionTrack[] =
@@ -105,6 +141,10 @@ export async function fetchTranscript(
   if (!r.ok) return null;
   const text = await r.text();
   if (!text) return null;
+  if (text.trimStart().startsWith("<")) {
+    const segments = parseXmlCaptions(text);
+    return segments.length ? { segments, language: track.languageCode } : null;
+  }
   try {
     const j = JSON.parse(text);
     const segments: TranscriptSegment[] = (j.events ?? [])
@@ -119,6 +159,50 @@ export async function fetchTranscript(
   } catch {
     return null;
   }
+}
+
+function decodeEntities(s: string) {
+  return s
+    .replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"').replace(/&#39;/g, "'")
+    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)));
+}
+
+/** Handles both legacy `<text start dur>` and srv3 `<p t d>` caption XML. */
+function parseXmlCaptions(xml: string): TranscriptSegment[] {
+  const out: TranscriptSegment[] = [];
+  const re = /<(text|p)\s+([^>]*)>([\s\S]*?)<\/\1>/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(xml))) {
+    const attr = (k: string) => m![2].match(new RegExp(`${k}="([\\d.]+)"`))?.[1];
+    const isMs = m[1] === "p";
+    const start = Number(attr(isMs ? "t" : "start") ?? 0) / (isMs ? 1000 : 1);
+    const duration = Number(attr(isMs ? "d" : "dur") ?? 0) / (isMs ? 1000 : 1);
+    const text = decodeEntities(m[3].replace(/<[^>]+>/g, "")).replace(/\s+/g, " ").trim();
+    if (text) out.push({ start, duration, text });
+  }
+  return out;
+}
+
+/**
+ * Parses a transcript pasted from YouTube's "Show transcript" panel
+ * (timestamp lines like "1:23" followed by text). Plain text without
+ * timestamps is accepted too.
+ */
+export function parsePastedTranscript(raw: string): TranscriptSegment[] {
+  const ts = /^(?:(\d+):)?(\d{1,2}):(\d{2})$/;
+  const out: TranscriptSegment[] = [];
+  let t = 0;
+  for (const line of raw.split(/\r?\n/).map((l) => l.trim()).filter(Boolean)) {
+    const m = line.match(ts);
+    if (m) {
+      t = Number(m[1] ?? 0) * 3600 + Number(m[2]) * 60 + Number(m[3]);
+      continue;
+    }
+    if (/^\d+ (?:seconds?|minutes?|hours?)(?:,? \d+ (?:seconds?|minutes?))*$/i.test(line)) continue; // screen-reader duplicates
+    out.push({ start: t, duration: 0, text: line });
+  }
+  return out;
 }
 
 /** Collapse tiny caption events into ~N-second blocks prefixed with [mm:ss]. */
