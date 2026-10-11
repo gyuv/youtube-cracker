@@ -65,26 +65,38 @@ export async function generate<T = string>(opts: GenerateOpts): Promise<T> {
       lastErr = err;
       const status = err?.status ?? Number(String(err?.message).match(/\[(\d{3})/)?.[1]);
       const dailyQuota = /PerDay|per day/i.test(String(err?.message));
+      console.error(`[gemini] attempt ${attempt + 1} failed (status ${status}):`, String(err?.message).slice(0, 500));
       const retryable = (status === 429 && !dailyQuota) || status === 503 || status === 500 || err instanceof SyntaxError;
       if (!retryable || attempt === 3) break;
       await new Promise((r) => setTimeout(r, 2000 * 2 ** attempt + Math.random() * 500));
     }
   }
-  const msg = String((lastErr as any)?.message ?? lastErr);
-  if (/429|quota|rate/i.test(msg)) {
-    const perDay = /PerDay|per day|daily/i.test(msg);
-    const retry = msg.match(/retry in ([\d.]+)s/i)?.[1];
+  const raw = String((lastErr as any)?.message ?? lastErr);
+  const status: number | undefined =
+    (lastErr as any)?.status ?? (Number(raw.match(/\[(\d{3})[ \]]/)?.[1]) || undefined);
+  // Drop the SDK's "Error fetching from https://…:generateContent:" prefix so users see Google's actual reason.
+  const reason = raw.replace(/^\[GoogleGenerativeAI Error\]:\s*/, "").replace(/^Error fetching from \S+:\s*/, "").slice(0, 400);
+
+  if (status === 429) {
+    const perDay = /PerDay|per day|daily/i.test(raw);
+    const retry = raw.match(/retry in ([\d.]+)s/i)?.[1];
     throw new GeminiError(
       perDay
         ? `Gemini free-tier DAILY quota for ${MODEL} is used up. It resets at midnight Pacific time, or set GEMINI_MODEL to another model (e.g. gemini-2.5-flash-lite).`
-        : `Gemini free-tier per-minute limit hit${retry ? ` — retry in ${Math.ceil(Number(retry))}s` : ", wait a minute and retry"}. Long videos without captions use the most quota; pasting the transcript avoids that.`,
+        : `Gemini free-tier per-minute limit hit${retry ? ` — retry in ${Math.ceil(Number(retry))}s` : ", wait a minute and retry"}. Details: ${reason}`,
       "RATE_LIMIT",
     );
   }
-  if (/not found|404|is not supported/i.test(msg)) {
-    throw new GeminiError(`Gemini model "${MODEL}" is unavailable for this key. Set GEMINI_MODEL to a current model (e.g. gemini-2.5-flash).`, "AI_ERROR");
+  if (status === 404) {
+    throw new GeminiError(`Gemini model "${MODEL}" is unavailable for this key. Set GEMINI_MODEL to a current model. Details: ${reason}`, "AI_ERROR");
   }
-  throw new GeminiError(`Gemini request failed: ${msg.slice(0, 300)}`, "AI_ERROR");
+  if (status === 400 && /API key/i.test(raw)) {
+    throw new GeminiError(`GEMINI_API_KEY is invalid. Create a new key at aistudio.google.com and update it in Vercel. Details: ${reason}`, "NO_API_KEY");
+  }
+  if (status === 403) {
+    throw new GeminiError(`Gemini refused this key (403). Check the key in Vercel and that the Generative Language API is enabled. Details: ${reason}`, "NO_API_KEY");
+  }
+  throw new GeminiError(`Gemini request failed${status ? ` (${status})` : ""}: ${reason}`, "AI_ERROR");
 }
 
 function stripFences(t: string) {
@@ -93,7 +105,8 @@ function stripFences(t: string) {
 
 /** Multimodal part pointing Gemini directly at a public YouTube video. */
 export function youtubePart(url: string): Part {
-  return { fileData: { fileUri: url, mimeType: "video/*" } };
+  // Gemini's YouTube support takes the bare URL; mimeType is required by the SDK's types but not by the API.
+  return { fileData: { fileUri: url } } as unknown as Part;
 }
 
 // ---------- Response schemas ----------
